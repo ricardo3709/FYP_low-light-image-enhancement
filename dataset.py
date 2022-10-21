@@ -28,6 +28,15 @@ def auto_padding(img, times=32):
     return img, [w1, w2, h1, h2]
 
 
+def channel4_auto_padding(img, times=32):
+    b, c, h, w = img.shape
+    h1, w1 = (times - h % times) // 2, (times - w % times) // 2
+    h2, w2 = (times - h % times) - h1, (times - w % times) - w1
+    print("4 channel: h1,h2,w1,w2", h1, h2, w1, w2)
+    img = F.pad(img, [w1, w2, h1, h2], "reflect")
+    return img, [w1, w2, h1, h2]
+
+
 def to_bchw_tensor(np_img):
     img_tensor = torch.tensor(np_img)
     if len(img_tensor.shape) == 2:

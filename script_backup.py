@@ -23,6 +23,8 @@ import glob
 import torch.nn as nn
 import torch.optim as optim
 import imageio
+import torch.nn.functional as F
+from dataset import channel4_auto_padding
 torch.cuda.empty_cache()
 
 
@@ -46,6 +48,15 @@ for i in range(len(test_fns)):
 # print(test_ids)
 
 
+def remove_padding(ori_tensor, pad_tensor):
+    _, _, ori_h, ori_w = ori_tensor.shape
+    _, _, pad_h, pad_w = pad_tensor.shape
+    dh = (pad_h-ori_h)//2
+    dw = (pad_w-ori_w)//2
+    removed_pad_tensor = pad_tensor[:, :, dh:pad_h-dh:1, dw:pad_w-dw:1]
+    return removed_pad_tensor
+
+
 def pack_raw(raw):
     # pack Bayer image to 4 channels
     im = np.maximum(raw - 512, 0) / (16383 - 512)  # subtract the black level
@@ -58,10 +69,10 @@ def pack_raw(raw):
     print("___RAW___")
     print("shape bef", img_shape)
 
-    out = np.concatenate((im[0:H:2, 0:W:2, :],
-                          im[0:H:2, 1:W:2, :],
-                          im[1:H:2, 1:W:2, :],
-                          im[1:H:2, 0:W:2, :]), axis=2)
+    out = np.concatenate((im[0:H:2, 0:W:2, :],  # Red
+                          im[0:H:2, 1:W:2, :],  # Green_1
+                          im[1:H:2, 1:W:2, :],  # Blue
+                          im[1:H:2, 0:W:2, :]), axis=2)  # Green_2
     print("shape aft", out.shape)
     return out
 
@@ -133,12 +144,14 @@ def reconstruct_preprocess(img_index, mode, test_id):
     model = model.to(device)
 
     dataset = RawImageDataset(
-        "./datasets/SID/Sony/short/", split="train")
+        "/home/wang1423/project/compare/codes/datasets/SID/Sony/short/", split="train")
     #dataset = RawImageDataset("./datasets/fivek_dataset", split="val")
     # for i in range(5):
     psnr_list = []
     # Use only first image
     _, raw_file, raw_path = dataset[img_index]
+    # overwrite raw_path with gt file to test first model
+    # raw_path = '/home/wang1423/project/compare/codes/datasets/SID/Sony/long/10192_00_10s.ARW'
     in_path = raw_path
     _, in_fn = os.path.split(in_path)
     # print(in_fn)
@@ -153,9 +166,9 @@ def reconstruct_preprocess(img_index, mode, test_id):
     ###
 
     im = raw.raw_image_visible.astype(np.float32)
-    input_full = np.expand_dims(pack_raw(im), axis=0) * ratio
+    # pack bayer raw into 4 channels
+    input_full = np.expand_dims(pack_raw(im), axis=0)
     input_full = np.minimum(input_full, 1.0)
-
     tensor_xyz = torch.from_numpy(input_full).permute(0, 3, 1, 2).to(device)
 
     if mode == 'lossless':
@@ -177,77 +190,6 @@ def reconstruct_preprocess(img_index, mode, test_id):
         print("invalid mode")
 
     return tensor_jpg, tensor_xyz, raw_path
-
-
-def reconstrcut(jpeg, linear_space_input, patch_size=128, neighbourhood_size=512, desired_ratio=0.002):
-    """_summary_
-    Args:
-        jpeg (torch.Tensor): the image after ISP with the shape 3*H*W
-        linear_space_input (torch.Tensor): the linear space image, e.g., RAW space and XYZ space, with the shape 3*H*W
-        patch_size (int, optional): _description_. Defaults to 100.
-        neighbourhood_size (int, optional): _description_. Defaults to 500.
-        desired_ratio (float, optional): _description_. Defaults to 0.002.
-    Returns:
-        _type_: _description_
-    """
-    sampling_ratio = round(math.sqrt(1/desired_ratio))
-    print("sampling ratio: ", sampling_ratio)
-    tensor_jpg, _ = auto_padding(jpeg, patch_size)
-    tensor_xyz, _ = auto_padding(linear_space_input, patch_size)
-    tensor_jpg, tensor_xyz = tensor_jpg.squeeze(), tensor_xyz.squeeze()
-    print("tensor jpg size", tensor_jpg.shape)
-    print("tensor xyz size", tensor_xyz.shape)
-    rgb_padded = F.pad(
-        tensor_jpg, [(neighbourhood_size-patch_size)//2]*4, mode="reflect")
-    xyz_padded = F.pad(
-        tensor_xyz,  [(neighbourhood_size-patch_size)//2]*4, mode="reflect")
-    # print("padded tensor jpg size", rgb_padded.shape)
-    # print("padded tensor xyz size", xyz_padded.shape)
-
-    num_of_patch_x = tensor_jpg.shape[1] // patch_size
-    num_of_patch_y = tensor_jpg.shape[2] // patch_size
-
-    def to_pixel_index_l(i): return i*patch_size
-    def to_pixel_index_r(i): return (i-1)*patch_size + neighbourhood_size
-
-    # rgb_neighbor_patch_list = []
-    # xyz_neighbor_patch_list = []
-    with torch.no_grad():
-        rec_xyz = torch.zeros_like(tensor_xyz)
-        weight_list = []
-        for i, j in tqdm.tqdm(list(product(range(num_of_patch_x//2), range(num_of_patch_y//2)))):
-            # print("i:", i)
-            # print("j:", j)
-            # print(to_pixel_index_l(j))
-            # print(to_pixel_index_r(j+1))
-            rgb_neighbor_patch = rgb_padded[:, to_pixel_index_l(i):to_pixel_index_r(
-                i+1), to_pixel_index_l(j):to_pixel_index_r(j+1)]
-
-            xyz_neighbor_patch = xyz_padded[:, to_pixel_index_l(i):to_pixel_index_r(
-                i+1), to_pixel_index_l(j):to_pixel_index_r(j+1)]
-            # rgb_neighbor_patch_list.append(rgb_neighbor_patch)
-            # xyz_neighbor_patch_list.append(xyz_neighbor_patch)
-
-            rec_xyz_patch, weight = solve_linear(
-                rgb_neighbor_patch, xyz_neighbor_patch, sampling_ratio, neighbourhood_size, patch_size)
-            weight_list.append(weight)
-            rec_xyz[:, i*patch_size:(i+1)*patch_size, j *
-                    patch_size:(j+1)*patch_size] = rec_xyz_patch
-
-        # sampling_ratio = round(math.sqrt(1/desired_ratio))
-        # bpp = 1/(sampling_ratio**2)*3*16
-        # print("BPP: %.4e" % bpp)
-
-        rec_xyz = rec_xyz.unsqueeze(0)
-        # output = rec_xyz.permute(0, 2, 3, 1).cpu().data.numpy()
-        # output = np.minimum(np.maximum(output, 0), 1)
-        # output = output[0, :, :, :]
-        # Image.fromarray((output*255).astype('uint8')
-        #                 ).save(result_dir + 'rec.png')
-
-        rec_xyz = rec_xyz.clip(0, 1)
-        # save_image(rec_xyz, 'rec.png')
-        return rec_xyz
 
 
 def SID_model(rec_xyz_tensor, test_id, input_id, mode):
@@ -303,7 +245,7 @@ def SID_model(rec_xyz_tensor, test_id, input_id, mode):
     with torch.no_grad():
         # rec_xyz_tensor = rec_xyz_tensor.permute(0, 1, 2).to(device)
         # rec_xyz_tensor = torch.unsqueeze(rec_xyz_tensor, dim=0)
-        print(rec_xyz_tensor.shape)
+        rec_xyz_tensor = rec_xyz_tensor * ratio
         out_img = model(rec_xyz_tensor)
     ###
 
@@ -407,12 +349,13 @@ def solve_linear(rgb_neighbor_patch, xyz_neighbor_patch, sampling_ratio, neighbo
     A = torch.cat([torch.cat([M, P], dim=1), torch.cat(
         [P.T, torch.zeros(6, 6)], dim=1)], dim=0)
     B = torch.cat([r_c.view(r_c.shape[0], -1).permute(1, 0),
-                   torch.zeros(6, r_c.shape[0])], dim=0)
+                   torch.zeros(6, r_c.shape[0])], dim=0)  # should have 7?
     A = A.float()
     B = B.float()
     try:
         res = torch.linalg.solve(A, B)
-    except:
+    except Exception as e:
+        print(e)
         res = torch.linalg.solve(A+torch.rand_like(A)*1e-3, B)
     # res = torch.linalg.solve(A, B)
 
@@ -427,13 +370,84 @@ def solve_linear(rgb_neighbor_patch, xyz_neighbor_patch, sampling_ratio, neighbo
     P_ = torch.cat([torch.ones([M_.shape[0], 1]),
                     S_query_flattened.T], dim=1)
     rec_xyx_patch = (
-        torch.cat([M_, P_], dim=1)@res.double()).reshape(128, 128, 4).permute(2, 0, 1)
+        torch.cat([M_, P_], dim=1)@res.double()).reshape(128, 128, 4).permute(2, 0, 1)  # only thing change here is channel=4
     return rec_xyx_patch, res
 
 
+def reconstrcut(jpeg, linear_space_input, patch_size=128, neighbourhood_size=512, desired_ratio=0.002):
+    """_summary_
+    Args:
+        jpeg (torch.Tensor): the image after ISP with the shape 3*H*W
+        linear_space_input (torch.Tensor): the linear space image, e.g., RAW space and XYZ space, with the shape 3*H*W
+        patch_size (int, optional): _description_. Defaults to 100.
+        neighbourhood_size (int, optional): _description_. Defaults to 500.
+        desired_ratio (float, optional): _description_. Defaults to 0.002.
+    Returns:
+        _type_: _description_
+    """
+    sampling_ratio = round(math.sqrt(1/desired_ratio))
+    print("sampling ratio: ", sampling_ratio)
+    tensor_jpg, _ = auto_padding(jpeg, patch_size)
+    tensor_xyz, _ = channel4_auto_padding(linear_space_input, patch_size)
+    tensor_jpg, tensor_xyz = tensor_jpg.squeeze(), tensor_xyz.squeeze()
+    print("tensor jpg size", tensor_jpg.shape)
+    print("tensor xyz size", tensor_xyz.shape)
+    rgb_padded = F.pad(
+        tensor_jpg, [(neighbourhood_size-patch_size)//2]*4, mode="reflect")
+    xyz_padded = F.pad(
+        tensor_xyz,  [(neighbourhood_size-patch_size)//2]*4, mode="reflect")
+    # print("padded tensor jpg size", rgb_padded.shape)
+    # print("padded tensor xyz size", xyz_padded.shape)
+
+    num_of_patch_x = tensor_jpg.shape[1] // patch_size
+    num_of_patch_y = tensor_jpg.shape[2] // patch_size
+
+    def to_pixel_index_l(i): return i*patch_size
+    def to_pixel_index_r(i): return (i-1)*patch_size + neighbourhood_size
+
+    # rgb_neighbor_patch_list = []
+    # xyz_neighbor_patch_list = []
+    with torch.no_grad():
+        rec_xyz = torch.zeros_like(tensor_xyz)
+        weight_list = []
+        for i, j in tqdm.tqdm(list(product(range(num_of_patch_x), range(num_of_patch_y)))):
+            # since pack_raw reduces H&W to half, we divide num_of_path by 2
+            # print("i:", i)
+            # print("j:", j)
+            # print(to_pixel_index_l(j))
+            # print(to_pixel_index_r(j+1))
+            rgb_neighbor_patch = rgb_padded[:, to_pixel_index_l(i):to_pixel_index_r(
+                i+1), to_pixel_index_l(j):to_pixel_index_r(j+1)]
+
+            xyz_neighbor_patch = xyz_padded[:, to_pixel_index_l(i):to_pixel_index_r(
+                i+1), to_pixel_index_l(j):to_pixel_index_r(j+1)]
+            # rgb_neighbor_patch_list.append(rgb_neighbor_patch)
+            # xyz_neighbor_patch_list.append(xyz_neighbor_patch)
+
+            rec_xyz_patch, weight = solve_linear(
+                rgb_neighbor_patch, xyz_neighbor_patch, sampling_ratio, neighbourhood_size, patch_size)
+            weight_list.append(weight)
+            rec_xyz[:, i*patch_size:(i+1)*patch_size, j *
+                    patch_size:(j+1)*patch_size] = rec_xyz_patch
+
+        # sampling_ratio = round(math.sqrt(1/desired_ratio))
+        # bpp = 1/(sampling_ratio**2)*3*16
+        # print("BPP: %.4e" % bpp)
+
+        rec_xyz = rec_xyz.unsqueeze(0)
+        # output = rec_xyz.permute(0, 2, 3, 1).cpu().data.numpy()
+        # output = np.minimum(np.maximum(output, 0), 1)
+        # output = output[0, :, :, :]
+        # Image.fromarray((output*255).astype('uint8')
+        #                 ).save(result_dir + 'rec.png')
+
+        rec_xyz = rec_xyz.clip(0, 1)
+        # save_image(rec_xyz, 'rec.png')
+        return rec_xyz
+
+
 if __name__ == "__main__":
-    # tensor_jpg, tensor_xyz = main_batch_preprocess()
-    # print("output tensor size: ", tensor_xyz.shape)
+    # input to recon model: Bayer pack_raw 4 channel. 1*4*H/2*W/2
     counter = 0
     test_ids.sort()
     mode = 'lossless'
@@ -444,11 +458,18 @@ if __name__ == "__main__":
             tensor_jpg, tensor_xyz, input_id = reconstruct_preprocess(
                 img_index, mode, test_id)
             rec_xyz_tensor = reconstrcut(
-                tensor_jpg, tensor_xyz, desired_ratio=0.0002)
+                F.interpolate(tensor_jpg.unsqueeze(0), scale_factor=(0.5, 0.5)), tensor_xyz, desired_ratio=0.002)
+            output_rec_tensor = remove_padding(tensor_xyz, rec_xyz_tensor)
+            # use first 3 channel of recon tensor to render a png as reference
+            save_tensor = output_rec_tensor[:, :3]
+            save_image(save_tensor, '3channel_save.png')
+            enhacne_tensor = save_tensor * 100
+            save_image(enhacne_tensor, '3channel_enhance.png')
+
             print('tensor_xyz shape: ', tensor_xyz.shape)
-            print('rec_xyz_tensor shape: ', rec_xyz_tensor.shape)
+            print('rec_xyz_tensor shape: ', output_rec_tensor.shape)
             # test_id is GT_id for SID
-            SID_model(rec_xyz_tensor, test_id, input_id, mode)
+            SID_model(output_rec_tensor, test_id, input_id, mode)
         counter += 3
 
 

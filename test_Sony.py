@@ -63,12 +63,15 @@ for test_id in test_ids:
         # print(in_fn)
         gt_files = glob.glob(gt_dir + '/%05d_00*.ARW' % test_id)
         gt_path = gt_files[0]
+        # gt_path = '/home/wang1423/project/compare/codes/datasets/SID/Sony/long/10192_00_10s.ARW'
         _, gt_fn = os.path.split(gt_path)
         in_exposure = float(in_fn[9:-5])
         gt_exposure = float(gt_fn[9:-5])
         ratio = min(gt_exposure/in_exposure, 300)
+        ratio = 1
 
         ###
+        # in_path = '/home/wang1423/project/compare/codes/datasets/SID/Sony/long/10192_00_10s.ARW'
         raw = rawpy.imread(in_path)
         ###
 

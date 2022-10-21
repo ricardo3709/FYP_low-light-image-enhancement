@@ -1,4 +1,4 @@
-./datasets/SID/Sony/short/10192_00_0.033s.ARW
+./datasets/SID/Sony/short/10192_00_0.1s.ARW
 ./datasets/SID/Sony/short/10192_00_0.04s.ARW
 ./datasets/SID/Sony/short/10192_00_0.1s.ARW
 ./datasets/SID/Sony/short/10193_00_0.033s.ARW

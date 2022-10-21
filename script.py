@@ -48,21 +48,26 @@ for i in range(len(test_fns)):
 
 
 def RGB_to_Bayer(RGB_tensor):
+    RGB_tensor = RGB_tensor*16383  # convert to RAW
     tensor_shape = RGB_tensor.shape  # [1,3,H,W]
     H = tensor_shape[2]
     W = tensor_shape[3]
-    RGB_tensor = RGB_tensor[:, :, 48:H-48:1, 48:W-48:1]
+
+    RGB_tensor = RGB_tensor[:, :, 48:H-48:1, 48:W-48:1]  # remove padding
     tensor_shape = RGB_tensor.shape  # [1,3,H,W]
     H = tensor_shape[2]
     W = tensor_shape[3]
+
     R_layer = RGB_tensor[:, 0, 0:H:2, 0:W:2].unsqueeze(1)
-    G_layer = RGB_tensor[:, 1, 0:H:2, 0:W:2].unsqueeze(1)
+    G_layer_1 = RGB_tensor[:, 1, 0:H:2, 1:W:2].unsqueeze(1)
+    G_layer_2 = RGB_tensor[:, 1, 1:H:2, 0:W:2].unsqueeze(1)
     B_layer = RGB_tensor[:, 2, 0:H:2, 0:W:2].unsqueeze(1)
-    # R_tensor = torch.from_numpy(R_layer).unsqueeze(1)
-    # G_tensor = torch.from_numpy(G_layer).unsqueeze(1)
-    # B_tensor = torch.from_numpy(B_layer).unsqueeze(1)
-    # out = np.concatenate((R_tensor, G_tensor, B_layer, G_layer), axis=1)
-    out_tensor = torch.concat([R_layer, G_layer, B_layer, G_layer], dim=1)
+
+    out_tensor = torch.zeros([H, W])
+    out_tensor[0:H:2, 0:W:2] = R_layer
+    out_tensor[0:H:2, 1:W:2] = G_layer_1
+    out_tensor[0:H:2, 0:W:2] = B_layer
+    out_tensor[1:H:2, 0:W:2] = G_layer_2
     print('out_tensor shape : ', out_tensor.shape)
     # out_tensor = torch.from_numpy(out).unsqueeze(0)
     return out_tensor
@@ -80,10 +85,10 @@ def pack_raw(raw):
     print("___RAW___")
     print("shape bef", img_shape)
 
-    out = np.concatenate((im[0:H:2, 0:W:2, :],
-                          im[0:H:2, 1:W:2, :],
-                          im[1:H:2, 1:W:2, :],
-                          im[1:H:2, 0:W:2, :]), axis=2)
+    out = np.concatenate((im[0:H:2, 0:W:2, :],  # R
+                          im[0:H:2, 1:W:2, :],  # G1
+                          im[1:H:2, 1:W:2, :],  # B
+                          im[1:H:2, 0:W:2, :]), axis=2)  # G2
     print("shape aft", out.shape)
     return out
 
@@ -148,26 +153,6 @@ def main_batch_preprocess():
     print("xyz tensor:", tensor_xyz.shape)
     return tensor_jpg, tensor_xyz
 
-    # # edit part
-    # res_xyz = raw_file.raw_image_visible.astype(np.float32)
-    # res_xyz = np.expand_dims(res_xyz, axis=2)
-    # res_xyz_shape = res_xyz.shape
-    # H = res_xyz_shape[0]
-    # W = res_xyz_shape[1]
-
-    # xyz_out = np.concatenate((res_xyz[0:H:2, 0:W:2, :],
-    #                           res_xyz[0:H:2, 1:W:2, :],
-    #                           res_xyz[1:H:2, 1:W:2, :],
-    #                           res_xyz[1:H:2, 0:W:2, :]), axis=2)
-    # xyz_out = np.expand_dims(xyz_out, axis=0)
-    # xyz_full = np.minimum(xyz_out, 1.0)
-    # tensor_xyz = torch.from_numpy(
-    #     xyz_full).permute(0, 3, 1, 2).to(device)
-
-    # # tensor_xyz = to_tensor(res_xyz/65535).float()
-    # tensor_jpg = to_tensor(res_rgb)
-    # return tensor_jpg, tensor_xyz
-
 
 def reconstruct_preprocess(img_index, mode, test_id):
     model = SeeInDark()
@@ -192,6 +177,7 @@ def reconstruct_preprocess(img_index, mode, test_id):
     ratio = min(gt_exposure/in_exposure, 300)
     # print(ratio)
     ###
+    raw_path = gt_path
     raw = rawpy.imread(raw_path)
     ###
 
@@ -201,21 +187,21 @@ def reconstruct_preprocess(img_index, mode, test_id):
 
     # tensor_xyz = torch.from_numpy(input_full).permute(0, 3, 1, 2).to(device)
     res_xyz = raw.postprocess(output_color=rawpy.ColorSpace(
-        5), use_camera_wb=True, use_auto_wb=False, no_auto_bright=True, output_bps=16)  # 0 Raw 5 XYZ
+        1), use_camera_wb=True, use_auto_wb=False, no_auto_bright=True, output_bps=16)  # 0 Raw 5 XYZ
     tensor_xyz = to_tensor(res_xyz/65535).float()
 
     if mode == 'lossless':
         # for using lossless image as reference
         print("current recon mode: lossless")
         res_rgb = raw.postprocess(output_color=rawpy.ColorSpace(
-            5), use_camera_wb=True, use_auto_wb=False, no_auto_bright=True)
+            1), use_camera_wb=True, use_auto_wb=False, no_auto_bright=True)
         image = to_pil_image(res_rgb)
         tensor_jpg = to_tensor(image)
     elif mode == 'compress':
         # for using compressed image as reference:
         print("current recon mode: compress")
         res_rgb = raw.postprocess(output_color=rawpy.ColorSpace(
-            5), gamma=(1, 1), output_bps=16,
+            1), gamma=(1, 1), output_bps=16,
             use_camera_wb=True, use_auto_wb=False, no_auto_bright=True)
         imageio.imsave('temp_reference.jpg', res_rgb)
         image = Image.open('temp_reference.jpg')
@@ -297,7 +283,7 @@ def reconstrcut(jpeg, linear_space_input, patch_size=128, neighbourhood_size=512
         return rec_xyz
 
 
-def SID_model(rec_xyz_tensor, test_id, input_id, mode):
+def SID_model(recon_raw, test_id, input_id, mode):
     model = SeeInDark()
     model.load_state_dict(torch.load(
         m_path + m_name, map_location=torch.device('cpu')))
@@ -327,7 +313,12 @@ def SID_model(rec_xyz_tensor, test_id, input_id, mode):
     ###
 
     im = raw.raw_image_visible.astype(np.float32)
+    # im = recon_raw
     input_full = np.expand_dims(pack_raw(im), axis=0) * ratio
+    # input_full = input_full/6.0
+
+    # im = recon_raw
+    recon_full = np.expand_dims(pack_raw(im), axis=0) * ratio
 
     # check main_batch.py for this function
     # im = raw.postprocess(use_camera_wb=True, half_size=False,
@@ -350,8 +341,8 @@ def SID_model(rec_xyz_tensor, test_id, input_id, mode):
     with torch.no_grad():
         # rec_xyz_tensor = rec_xyz_tensor.permute(0, 1, 2).to(device)
         # rec_xyz_tensor = torch.unsqueeze(rec_xyz_tensor, dim=0)
-        print(rec_xyz_tensor.shape)
-        out_img = model(rec_xyz_tensor)
+        # print(rec_xyz_tensor.shape)
+        out_img = model(in_img)
     ###
 
     output = out_img.permute(0, 2, 3, 1).cpu().data.numpy()
@@ -494,10 +485,10 @@ if __name__ == "__main__":
                 tensor_jpg, tensor_xyz, desired_ratio=0.0002)
             print('tensor_xyz shape: ', tensor_xyz.shape)
             print('rec_xyz_tensor shape: ', rec_xyz_tensor.shape)
-            permute_tensor = RGB_to_Bayer(rec_xyz_tensor)
-            print('permuted shape: ', permute_tensor.shape)
+            recon_raw = RGB_to_Bayer(rec_xyz_tensor)
+            print('permuted shape: ', recon_raw.shape)
             # test_id is GT_id for SID
-            SID_model(permute_tensor, test_id, input_id, mode)
+            SID_model(recon_raw, test_id, input_id, mode)
         counter += 3
 
 
